@@ -48,7 +48,28 @@ jobs:
 
       - run: sdkmanager 'ndk;28.2.13676358'
 
-      # 不配置 release keystore：android/app/build.gradle.kts 会自动回落到 debug 签名。
+      # 用仓库里固定的 keystore 签名，避免每次 runner 生成不同的 debug 证书导致无法覆盖安装。
+      - name: Configure signing
+        env:
+          KEYSTORE: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${KEYSTORE:-}" ]; then
+            echo "缺少 ANDROID_KEYSTORE_BASE64"
+            exit 1
+          fi
+          KEYSTORE_PATH="$RUNNER_TEMP/guoapp.jks"
+          printf '%s' "$KEYSTORE" | base64 -d > "$KEYSTORE_PATH"
+          {
+            echo "ANDROID_KEYSTORE_PATH=$KEYSTORE_PATH"
+            echo "ANDROID_KEYSTORE_PASSWORD=$STORE_PASSWORD"
+            echo "ANDROID_KEY_ALIAS=$KEY_ALIAS"
+            echo "ANDROID_KEY_PASSWORD=$KEY_PASSWORD"
+          } >> "$GITHUB_ENV"
+
       - name: Build APK (arm64-v8a)
         run: python scripts/build_android.py --abi arm64-v8a
 
