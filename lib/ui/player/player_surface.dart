@@ -2,7 +2,6 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
@@ -75,6 +74,13 @@ class _PlayerSurfaceState extends State<PlayerSurface> {
   Player? _bound;
   int? _episodeIndex;
 
+  /// 切集（手动选集 / 自动连播）后到新一集真正开播之间有一段空窗，
+  /// 此时 `!state.playing / !_session.ready` 会把播控条顶出来一下，
+  /// 观感就是「一闪而过」。空窗内用这个标记压住这种被动显示，
+  /// 只有用户自己点出来才显示。
+  bool _switchingEpisode = false;
+  Timer? _switchTimer;
+
   PlaybackSession get _session => widget.handle.session;
 
   void _endSeek() {
@@ -96,7 +102,10 @@ class _PlayerSurfaceState extends State<PlayerSurface> {
       _episodeIndex = index;
     } else if (_episodeIndex != index) {
       _episodeIndex = index;
-      _revealForEpisodeChange();
+      _beginEpisodeSwitch();
+    }
+    if (_switchingEpisode && (_session.error != null || _session.paused)) {
+      _endEpisodeSwitch();
     }
     final player = _session.player;
     if (identical(player, _bound)) return;
@@ -125,7 +134,10 @@ class _PlayerSurfaceState extends State<PlayerSurface> {
     }
     _subscriptions.add(
       stream.playing.listen((playing) {
-        if (playing) _scheduleHide();
+        if (playing) {
+          _endEpisodeSwitch();
+          _scheduleHide();
+        }
         _refresh();
       }),
     );
@@ -140,6 +152,7 @@ class _PlayerSurfaceState extends State<PlayerSurface> {
     _seekTimer?.cancel();
     _tapTimer?.cancel();
     _streakTimer?.cancel();
+    _switchTimer?.cancel();
     if (_holding) _session.endBoost();
     for (final subscription in _subscriptions) {
       unawaited(subscription.cancel());
@@ -182,25 +195,28 @@ class _PlayerSurfaceState extends State<PlayerSurface> {
     _scheduleHide();
   }
 
-  /// 切集（手动选集 / 自动连播）时重新亮起播控条。
+  /// 切集（手动选集 / 自动连播）开始时调用。
   ///
-  /// 新一集的开播前 `state.playing` 是 false，build 里的
-  /// `_visible || !state.playing` 会强制把控件显形；一旦真正开播，
-  /// `_visible` 还是 false，AnimatedOpacity 立刻淡出，观感就是「一闪而过」。
-  /// 这里在 index 变化时把 `_visible` 置回 true，让控件从切集一直留到
-  /// 开播后的隐藏计时结束。
-  void _revealForEpisodeChange() {
-    if (!mounted) return;
-    final phase = SchedulerBinding.instance.schedulerPhase;
-    // 会话通知可能在 build / layout 期间派发，那时不能直接改状态。
-    if (phase == SchedulerPhase.persistentCallbacks ||
-        phase == SchedulerPhase.midFrameMicrotasks) {
-      SchedulerBinding.instance.addPostFrameCallback((_) {
-        if (mounted) _show();
-      });
-      return;
-    }
-    _show();
+  /// 新一集开播前 `state.playing` 是 false、会话可能短暂不在 ready，
+  /// build 里的 `_visible || !state.playing || ...` 会把这时的播控条
+  /// 被动顶出来一下，随即又淡出，观感就是「一闪而过」。
+  /// 这里在换集到真正开播之间压住这种被动显示，让切集过程干净地黑过去，
+  /// 用户主动点一下仍然能唤出控件。
+  void _beginEpisodeSwitch() {
+    _switchingEpisode = true;
+    _switchTimer?.cancel();
+    // 兜底：万一新一集既不开播也不报错，别让控件一直被压住。
+    _switchTimer = Timer(const Duration(seconds: 8), () {
+      if (mounted) _endEpisodeSwitch();
+    });
+  }
+
+  void _endEpisodeSwitch() {
+    _switchTimer?.cancel();
+    _switchTimer = null;
+    if (!_switchingEpisode) return;
+    _switchingEpisode = false;
+    _refresh();
   }
 
   void _open(_Popup popup) {
@@ -329,8 +345,11 @@ class _PlayerSurfaceState extends State<PlayerSurface> {
     listenable: _session,
     builder: (context, _) {
       final state = _session.player.state;
+      // 切集空窗期内不因 `!playing / !ready` 被动亮起，避免「一闪而过」。
       final visible =
-          _visible || !state.playing || _session.stalled || !_session.ready;
+          _visible ||
+          (!_switchingEpisode &&
+              (!state.playing || _session.stalled || !_session.ready));
       final popup = visible ? _popup : null;
       return MouseRegion(
         onHover: (_) => _movePointer(),
@@ -382,7 +401,7 @@ class _PlayerSurfaceState extends State<PlayerSurface> {
                     )
                   : null,
             ),
-            _pausedMark(_session.ready && !state.playing),
+            _pausedMark(!_switchingEpisode && _session.ready && !state.playing),
             FadePresence(
               scaleFrom: .9,
               child: _streak != 0 ? _streakBadge() : null,

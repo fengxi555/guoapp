@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
-import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
@@ -57,6 +56,12 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
   Player? _bound;
   int? _episodeIndex;
   Timer? _hideTimer;
+
+  /// 切集（手动选集 / 自动连播）后到新一集真正开播之间有一段空窗，
+  /// 此时 `_pinned` 里的 `!_session.ready` 会把播控条顶出来一下，
+  /// 观感就是「一闪而过」。空窗内用这个标记压住这种被动显示。
+  bool _switchingEpisode = false;
+  Timer? _switchTimer;
   Timer? _tapTimer;
   Timer? _streakTimer;
   Timer? _clockTimer;
@@ -125,6 +130,7 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
     _streakTimer?.cancel();
     _clockTimer?.cancel();
     _seekTimer?.cancel();
+    _switchTimer?.cancel();
     if (_holding) _session.endBoost();
     if (widget.onFullscreen == null) {
       if (_full == true && desktopPlatform) {
@@ -150,7 +156,10 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
       _episodeIndex = index;
     } else if (_episodeIndex != index) {
       _episodeIndex = index;
-      _revealForEpisodeChange();
+      _beginEpisodeSwitch();
+    }
+    if (_switchingEpisode && (_session.error != null || _session.paused)) {
+      _endEpisodeSwitch();
     }
     final player = _session.player;
     if (identical(player, _bound)) {
@@ -173,7 +182,10 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
     );
     _subscriptions.add(
       stream.playing.listen((playing) {
-        if (playing) _scheduleHide();
+        if (playing) {
+          _endEpisodeSwitch();
+          _scheduleHide();
+        }
         _refresh();
       }),
     );
@@ -219,22 +231,27 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
     _scheduleHide();
   }
 
-  /// 切集（手动选集 / 自动连播）时重新亮起播控条。
+  /// 切集（手动选集 / 自动连播）开始时调用。
   ///
-  /// 新一集开播前 `state.playing` 是 false，build 里的 `_visible || _pinned`
-  /// 会因为 `!_session.ready` 把控件顶出来；等真正开播、`_pinned` 变 false 时
-  /// `_visible` 还是 false，控件立刻消失，观感就是「一闪而过」。
-  void _revealForEpisodeChange() {
-    if (!mounted) return;
-    final phase = SchedulerBinding.instance.schedulerPhase;
-    if (phase == SchedulerPhase.persistentCallbacks ||
-        phase == SchedulerPhase.midFrameMicrotasks) {
-      SchedulerBinding.instance.addPostFrameCallback((_) {
-        if (mounted) _show();
-      });
-      return;
-    }
-    _show();
+  /// 新一集开播前 `_session.ready` 会是 false，build 里的
+  /// `_visible || _pinned` 会因为 `!_session.ready` 把控件顶出来一下，
+  /// 等真正开播后又立刻消失，观感就是「一闪而过」。
+  /// 这里在换集到真正开播之间压住这种被动显示。
+  void _beginEpisodeSwitch() {
+    _switchingEpisode = true;
+    _switchTimer?.cancel();
+    // 兜底：万一新一集既不开播也不报错，别让控件一直被压住。
+    _switchTimer = Timer(const Duration(seconds: 8), () {
+      if (mounted) _endEpisodeSwitch();
+    });
+  }
+
+  void _endEpisodeSwitch() {
+    _switchTimer?.cancel();
+    _switchTimer = null;
+    if (!_switchingEpisode) return;
+    _switchingEpisode = false;
+    _refresh();
   }
 
   void _toggleControls() {
@@ -445,7 +462,13 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
 
   Widget _video(BuildContext context, bool full) {
     final session = _session;
-    final visible = _visible || _pinned;
+    // 切集空窗期内不因 `!_session.ready` 被动亮起，避免「一闪而过」；
+    // 用户正在拖拽/开着面板时仍然照常显示。
+    final visible =
+        _visible ||
+        _dragging ||
+        _panel != null ||
+        (!_switchingEpisode && _pinned);
     final sidePanel = switch (_panel) {
       final panel? when full && _sidePanel(panel) => _panelBody(context, panel),
       _ => null,
