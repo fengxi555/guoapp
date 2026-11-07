@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
@@ -72,6 +73,7 @@ class _PlayerSurfaceState extends State<PlayerSurface> {
   double? _seekTarget;
   Timer? _seekTimer;
   Player? _bound;
+  int? _episodeIndex;
 
   PlaybackSession get _session => widget.handle.session;
 
@@ -89,6 +91,13 @@ class _PlayerSurfaceState extends State<PlayerSurface> {
   }
 
   void _bind() {
+    final index = _session.index;
+    if (_episodeIndex == null) {
+      _episodeIndex = index;
+    } else if (_episodeIndex != index) {
+      _episodeIndex = index;
+      _revealForEpisodeChange();
+    }
     final player = _session.player;
     if (identical(player, _bound)) return;
     _bound = player;
@@ -171,6 +180,27 @@ class _PlayerSurfaceState extends State<PlayerSurface> {
     if (!mounted) return;
     if (!_visible) setState(() => _visible = true);
     _scheduleHide();
+  }
+
+  /// 切集（手动选集 / 自动连播）时重新亮起播控条。
+  ///
+  /// 新一集的开播前 `state.playing` 是 false，build 里的
+  /// `_visible || !state.playing` 会强制把控件显形；一旦真正开播，
+  /// `_visible` 还是 false，AnimatedOpacity 立刻淡出，观感就是「一闪而过」。
+  /// 这里在 index 变化时把 `_visible` 置回 true，让控件从切集一直留到
+  /// 开播后的隐藏计时结束。
+  void _revealForEpisodeChange() {
+    if (!mounted) return;
+    final phase = SchedulerBinding.instance.schedulerPhase;
+    // 会话通知可能在 build / layout 期间派发，那时不能直接改状态。
+    if (phase == SchedulerPhase.persistentCallbacks ||
+        phase == SchedulerPhase.midFrameMicrotasks) {
+      SchedulerBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _show();
+      });
+      return;
+    }
+    _show();
   }
 
   void _open(_Popup popup) {

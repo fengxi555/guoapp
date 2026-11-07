@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
@@ -54,6 +55,7 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
   final _selected = <int>{};
   final _links = {_Panel.speed: LayerLink(), _Panel.quality: LayerLink()};
   Player? _bound;
+  int? _episodeIndex;
   Timer? _hideTimer;
   Timer? _tapTimer;
   Timer? _streakTimer;
@@ -143,6 +145,13 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
       _session.setForeground(playerVisible(state));
 
   void _bind() {
+    final index = _session.index;
+    if (_episodeIndex == null) {
+      _episodeIndex = index;
+    } else if (_episodeIndex != index) {
+      _episodeIndex = index;
+      _revealForEpisodeChange();
+    }
     final player = _session.player;
     if (identical(player, _bound)) {
       _refresh();
@@ -208,6 +217,24 @@ class _LandscapePlayerPageState extends State<LandscapePlayerPage>
   void _show() {
     if (!_visible) setState(() => _visible = true);
     _scheduleHide();
+  }
+
+  /// 切集（手动选集 / 自动连播）时重新亮起播控条。
+  ///
+  /// 新一集开播前 `state.playing` 是 false，build 里的 `_visible || _pinned`
+  /// 会因为 `!_session.ready` 把控件顶出来；等真正开播、`_pinned` 变 false 时
+  /// `_visible` 还是 false，控件立刻消失，观感就是「一闪而过」。
+  void _revealForEpisodeChange() {
+    if (!mounted) return;
+    final phase = SchedulerBinding.instance.schedulerPhase;
+    if (phase == SchedulerPhase.persistentCallbacks ||
+        phase == SchedulerPhase.midFrameMicrotasks) {
+      SchedulerBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _show();
+      });
+      return;
+    }
+    _show();
   }
 
   void _toggleControls() {

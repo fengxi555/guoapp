@@ -1,0 +1,60 @@
+name: Build Android (arm64)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-arm64-${{ github.ref }}
+
+env:
+  GOPROXY: https://proxy.golang.org,direct
+  GOSUMDB: sum.golang.org
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: native/go.mod
+          cache-dependency-path: native/go.sum
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.47.9'
+          channel: stable
+          cache: true
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: "platforms;android-36"
+          accept-android-sdk-licenses: true
+
+      - run: sdkmanager 'ndk;28.2.13676358'
+
+      # 不配置 release keystore：android/app/build.gradle.kts 会自动回落到 debug 签名。
+      - name: Build APK (arm64-v8a)
+        run: python scripts/build_android.py --abi arm64-v8a
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hongguojian-android-arm64
+          path: dist/android/*
+          if-no-files-found: error
+          retention-days: 14
